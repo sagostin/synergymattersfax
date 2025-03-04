@@ -213,6 +213,10 @@ func main() {
 		log.Println("No .env file found; proceeding with defaults")
 	}
 
+	// Shut down receiving lines when killed
+	sigchan := make(chan os.Signal, 1)
+	signal.Notify(sigchan, syscall.SIGTERM, syscall.SIGINT)
+
 	// Start background FTP server and folder watcher.
 	/*go startFtp()
 	go watchFaxFolder(os.Getenv("FTP_ROOT") + FaxDir)*/
@@ -372,7 +376,13 @@ func main() {
 	// START THE WEB SERVER
 	// -----------------------------
 	app.Listen(":8080")
-	select {} // Block forever.
+	select {
+	case sig := <-sigchan:
+		fmt.Print("Received ", sig, ", killing all channels")
+		time.Sleep(3 * time.Second)
+		//logger.Logger.Print("Terminating")
+		os.Exit(0)
+	}
 }
 
 // -----------------------------
