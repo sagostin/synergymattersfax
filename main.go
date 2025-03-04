@@ -465,7 +465,7 @@ func handleSfcFile(filePath string) {
 
 	lines := strings.Split(string(content), "\n")
 	if len(lines) < 2 {
-		log.Printf("Invalid SFC file format: %s", filePath)
+		log.Printf("Invalid SFC file format (len = %d): %s", len(lines), filePath)
 		return
 	}
 	faxNumber := lines[0]
