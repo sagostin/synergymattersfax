@@ -461,6 +461,8 @@ func handleSfcFile(filePath string) {
 		log.Printf("Error reading SFC file: %v", err)
 		return
 	}
+	log.Printf("SFC Content: %s", content)
+
 	lines := strings.Split(string(content), "\n")
 	if len(lines) < 2 {
 		log.Printf("Invalid SFC file format: %s", filePath)
