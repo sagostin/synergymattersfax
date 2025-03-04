@@ -6,6 +6,7 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.7.0
 	github.com/fsnotify/fsnotify v1.8.0
 	github.com/joho/godotenv v1.5.1
+	github.com/kataras/iris/v12 v12.2.11
 	github.com/knadh/go-pop3 v1.0.0
 	github.com/microsoftgraph/msgraph-sdk-go v1.57.0
 	goftp.io/server/v2 v2.0.1
@@ -47,7 +48,6 @@ require (
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/kataras/blocks v0.0.8 // indirect
 	github.com/kataras/golog v0.1.11 // indirect
-	github.com/kataras/iris/v12 v12.2.11 // indirect
 	github.com/kataras/pio v0.0.13 // indirect
 	github.com/kataras/sitemap v0.0.6 // indirect
 	github.com/kataras/tunnel v0.0.4 // indirect
