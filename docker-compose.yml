@@ -1,0 +1,13 @@
+version: '3'
+services:
+  sftpgo:
+    image: drakkan/sftpgo:v2.6.2-plugins
+    #container_name: some-sftpgo
+    ports:
+      - "8081:8080"
+      - "21:2021"
+      - "50000-50100:50000-50100"
+    volumes:
+      - ./sftpgo_config:/etc/sftpgo
+      - ./sftpgo_data:/var/lib/sftpgo
+      - ./synergyfax_ftp:/srv/sftpgo/synergyfax_ftp

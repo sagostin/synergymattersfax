@@ -248,10 +248,20 @@ func main() {
 			return
 		}
 
+		hylafaxJobID := generateJobID()
+
+		uuidParts := strings.Split(fax.UUID, "-")
+		if len(uuidParts) == 0 {
+			// handle error: invalid UUID format
+		}
+		baseName := uuidParts[len(uuidParts)-1]
+
+		t := time.Now()
+		fileTimestamp := t.Format("20060102150405")
+
 		// Change the file extension to .pdf even if fax.Filename ends with .tiff.
-		baseName := filepath.Base(fax.Filename)
-		pdfName := strings.TrimSuffix(baseName, filepath.Ext(baseName)) + ".pdf"
-		pdfLocalPath := filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, pdfName)
+		pdfName := "{" + baseName + "}" + fileTimestamp
+		pdfLocalPath := filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, pdfName+".pdf")
 
 		if err := os.MkdirAll(filepath.Dir(pdfLocalPath), 0755); err != nil {
 			ctx.StatusCode(iris.StatusInternalServerError)
@@ -265,13 +275,18 @@ func main() {
 		}
 		log.Printf("Saved PDF file to: %s", pdfLocalPath)
 
+		loc, err := time.LoadLocation("America/Vancouver")
+		if err != nil {
+			log.Fatalf("Failed to load location: %v", err)
+		}
+		recvTime := time.Now().In(loc).Format("01/02/06 15:04")
+
 		// Create a .recv file which will be used to signal fax receiving.
-		hylafaxJobID := "fax" + strconv.Itoa(getNextJobId())
-		recvFilename := hylafaxJobID + ".recv"
+		recvFilename := pdfName + ".recv"
 		recvLocalPath := filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, recvFilename)
 		recvContent := fmt.Sprintf("%s\n%s\n%s\n%s\n",
-			time.Now().Format("01/02/06 15:04"),
-			fax.CallUUID, // Used to correlate sessions.
+			recvTime,
+			"ttyS0", // Used to correlate sessions.
 			pdfName,
 			fax.CIDNum,
 		)
@@ -330,20 +345,22 @@ func main() {
 
 			// For outbound faxes, check if this notify corresponds to a job in our jobQueue.
 			jobQueue.Lock()
-			for synergyJobID, storedHylaFaxID := range jobQueue.entries {
+			for jobUUID, storedHylaFaxID := range jobQueue.entries {
 				// Assuming that you can correlate based on the fax UUID or CallUUID,
 				// here we check if the notify's UUID matches.
-				if job.UUID == storedHylaFaxID { // Adjust matching logic as needed.
+				if job.UUID == jobUUID { // Adjust matching logic as needed.
 					// Based on the notify result, create .done or .fail.
 					if job.Result.Success {
-						log.Printf("Notify indicates fax completed for job %s", synergyJobID)
+						log.Printf("Notify indicates fax completed for job %s", jobUUID)
+						createStsFile(storedHylaFaxID, "7", "0", "0", "success")
 						createFile(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, fmt.Sprintf("%s.done", storedHylaFaxID)), "")
 					} else {
-						log.Printf("Notify indicates fax failed for job %s", synergyJobID)
+						log.Printf("Notify indicates fax failed for job %s", jobUUID)
+						createStsFile(storedHylaFaxID, "3", "0", "0", "failed")
 						createFile(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, fmt.Sprintf("%s.fail", storedHylaFaxID)), "")
 					}
 					// Remove job from queue since we've processed it.
-					delete(jobQueue.entries, synergyJobID)
+					delete(jobQueue.entries, jobUUID)
 					break
 				}
 			}
@@ -371,7 +388,7 @@ func main() {
 	// is read. If the corresponding PDF is already present (or cached), the fax is submitted.
 	// The submitFax function creates a .jobid file, sends the fax via HTTP PUT (to a webhook), and
 	// creates .done or .fail files based on the result. It also adds the job to the global job queue.
-	go startFtp()
+	// go startFtp()
 	go watchFaxFolder(os.Getenv("FTP_ROOT") + FaxDir)
 
 	// -----------------------------
@@ -387,6 +404,86 @@ func main() {
 	}
 }
 
+func createStsFile(jobID, state, npages, totpages, status string) error {
+	stsFilePath := filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, fmt.Sprintf("q%s.sts", jobID))
+
+	// Open (or create) the file in read-write mode.
+	file, err := os.OpenFile(stsFilePath, os.O_RDWR|os.O_CREATE, 0660)
+	if err != nil {
+		return fmt.Errorf("error opening .sts file: %w", err)
+	}
+	defer file.Close()
+
+	// Read current file contents.
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		return fmt.Errorf("error reading .sts file: %w", err)
+	}
+
+	// Split the file content into lines.
+	lines := strings.Split(string(content), "\n")
+
+	// We'll update the known keys and mark which ones we've seen.
+	keysFound := map[string]bool{
+		"state":    false,
+		"npages":   false,
+		"totpages": false,
+		"status":   false,
+	}
+
+	// Update lines that start with our keys.
+	for i, line := range lines {
+		if strings.HasPrefix(line, "state:") {
+			lines[i] = "state:" + state
+			keysFound["state"] = true
+		} else if strings.HasPrefix(line, "npages:") {
+			lines[i] = "npages:" + npages
+			keysFound["npages"] = true
+		} else if strings.HasPrefix(line, "totpages:") {
+			lines[i] = "totpages:" + totpages
+			keysFound["totpages"] = true
+		} else if strings.HasPrefix(line, "status:") {
+			lines[i] = "status:" + status
+			keysFound["status"] = true
+		}
+	}
+
+	// Append lines for any keys that weren't found.
+	if !keysFound["state"] {
+		lines = append(lines, "state:"+state)
+	}
+	if !keysFound["npages"] {
+		lines = append(lines, "npages:"+npages)
+	}
+	if !keysFound["totpages"] {
+		lines = append(lines, "totpages:"+totpages)
+	}
+	if !keysFound["status"] {
+		lines = append(lines, "status:"+status)
+	}
+
+	newContent := strings.Join(lines, "\n")
+
+	// Seek to the beginning and truncate the file.
+	if _, err := file.Seek(0, 0); err != nil {
+		return fmt.Errorf("error seeking in .sts file: %w", err)
+	}
+	if err := file.Truncate(0); err != nil {
+		return fmt.Errorf("error truncating .sts file: %w", err)
+	}
+
+	// Write the updated content back to the file.
+	if _, err := file.WriteString(newContent); err != nil {
+		return fmt.Errorf("error writing to .sts file: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("error syncing .sts file: %w", err)
+	}
+
+	log.Printf(".sts file updated: %s", stsFilePath)
+	return nil
+}
+
 // -----------------------------
 // SENDING & FTP WATCHER FUNCTIONS
 // -----------------------------
@@ -397,6 +494,8 @@ func startFtp() {
 		log.Fatal(err)
 	}
 
+	port, err := strconv.Atoi(os.Getenv("FTP_PORT"))
+
 	s, err := server.NewServer(&server.Options{
 		Driver: driver,
 		Auth: &server.SimpleAuth{
@@ -405,6 +504,7 @@ func startFtp() {
 		},
 		Perm:      server.NewSimplePerm("root", "root"),
 		RateLimit: 1000000, // 1MB/s limit
+		Port:      port,
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -465,11 +565,12 @@ func handleSfcFile(filePath string) {
 
 	lines := strings.Split(string(content), "\n")
 	if len(lines) < 2 {
-		log.Printf("Invalid SFC file format (len = %d): %s", len(lines), filePath)
+		log.Printf("Invalid SFC file format (len = %d): %s - content: %s", len(lines), filePath, string(content))
 		return
 	}
-	faxNumber := lines[0]
-	pdfFile := lines[1]
+
+	faxNumber := strings.ReplaceAll(lines[0], "\r", "")
+	pdfFile := strings.ReplaceAll(lines[1], "\r", "")
 	log.Printf("SFC file processed: FaxNumber=%s, PDFFile=%s", faxNumber, pdfFile)
 
 	cache.Lock()
@@ -556,7 +657,7 @@ func submitFax(faxNumber, pdfFile, pdfPath, sfcFileName string) (string, error) 
 	defer resp.Body.Close()
 
 	// Create a .sts file to indicate the fax has been sent.
-	if err := createStsFile(hylaJobID, "6", "0", "0", "Sent to WebHook"); err != nil {
+	if err := createStsFile(hylaJobID, "3", "0", "0", "Sent to WebHook"); err != nil {
 		return "", err
 	}
 
@@ -580,7 +681,7 @@ func submitFax(faxNumber, pdfFile, pdfPath, sfcFileName string) (string, error) 
 	}
 
 	// For outbound faxes, add the job to the queue for later notify updates.
-	addFaxJob(jobID, hylaJobID)
+	addFaxJob(outResp.JobUUID, jobID, hylaJobID)
 	log.Printf("Fax submitted successfully: FaxNumber=%s, PDFFile=%s, JobID=%s, Returned Job UUID=%s",
 		faxNumber, pdfFile, jobID, outResp.JobUUID)
 
@@ -588,90 +689,31 @@ func submitFax(faxNumber, pdfFile, pdfPath, sfcFileName string) (string, error) 
 }
 
 func createFile(filePath, content string) error {
-	err := os.WriteFile(filePath, []byte(content), 0644)
+	f, err := os.Create(filePath)
 	if err != nil {
 		return fmt.Errorf("error creating file %s: %w", filePath, err)
 	}
-	log.Printf("File created: %s", filePath)
+	defer f.Close()
+
+	_, err = f.WriteString(content)
+	if err != nil {
+		return fmt.Errorf("error writing content to file %s: %w", filePath, err)
+	}
+
+	log.Printf("File created with content: %s content: %s", filePath, string(content))
 	return nil
 }
 
-func createStsFile(jobID, state, npages, totpages, status string) error {
-	stsFilePath := filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, fmt.Sprintf("Q%s.sts", jobID))
-	file, err := os.OpenFile(stsFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0660)
-	if err != nil {
-		return fmt.Errorf("error creating .sts file: %w", err)
-	}
-	defer file.Close()
-
-	_, err = fmt.Fprintf(file, "state:%s\nnpages:%s\ntotpages:%s\nstatus:%s\n", state, npages, totpages, status)
-	if err != nil {
-		return fmt.Errorf("error writing to .sts file: %w", err)
-	}
-	if err := file.Sync(); err != nil {
-		return fmt.Errorf("error syncing .sts file: %w", err)
-	}
-	log.Printf(".sts file created: %s", stsFilePath)
-	return nil
-}
-
-func addFaxJob(synergyJobID, hylafaxJobID string) {
+func addFaxJob(jobUUID, synergyJobID, hylafaxJobID string) {
 	jobQueue.Lock()
 	defer jobQueue.Unlock()
-	jobQueue.entries[synergyJobID] = hylafaxJobID
-	log.Printf("Fax job added to queue: SynergyJobID=%s, HylaFaxJobID=%s", synergyJobID, hylafaxJobID)
+	jobQueue.entries[jobUUID] = hylafaxJobID
+	log.Printf("Fax job added to queue: JobUUID=%s SynergyJobID=%s, HylaFaxJobID=%s", jobUUID, synergyJobID, hylafaxJobID)
 }
 
 func generateJobID() string {
 	rand.Seed(time.Now().UnixNano())
 	return fmt.Sprintf("%s%08d", JobIDPrefix, rand.Intn(100000000))
-}
-
-// (Optional) Monitor .done and .sts files to update the job queue if needed.
-func monitorDoneFiles(dir string) {
-	for {
-		files, err := filepath.Glob(filepath.Join(dir, "*.done"))
-		if err != nil {
-			log.Printf("Error reading .done files: %v", err)
-			continue
-		}
-		for _, file := range files {
-			processDoneFile(file)
-		}
-		time.Sleep(5 * time.Second)
-	}
-}
-
-func processDoneFile(filePath string) {
-	fileName := filepath.Base(filePath)
-	hylafaxJobID := strings.TrimSuffix(fileName, ".done")
-
-	jobQueue.Lock()
-	defer jobQueue.Unlock()
-	for synergyJobID, storedHylaFaxID := range jobQueue.entries {
-		if storedHylaFaxID == hylafaxJobID {
-			log.Printf("Fax job completed: SynergyJobID=%s, HylaFaxJobID=%s", synergyJobID, hylafaxJobID)
-			delete(jobQueue.entries, synergyJobID)
-			break
-		}
-	}
-	if err := os.Remove(filePath); err != nil {
-		log.Printf("Error deleting .done file: %v", err)
-	}
-}
-
-func monitorStatusFiles(dir string) {
-	for {
-		files, err := filepath.Glob(filepath.Join(dir, "*.sts"))
-		if err != nil {
-			log.Printf("Error reading .sts files: %v", err)
-			continue
-		}
-		for _, file := range files {
-			processStatusFile(file)
-		}
-		time.Sleep(5 * time.Second)
-	}
 }
 
 func processStatusFile(filePath string) {
