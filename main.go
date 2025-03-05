@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/fsnotify/fsnotify"
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	"github.com/kataras/iris/v12"
 	"goftp.io/server/v2"
@@ -15,7 +16,6 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
-	"math/rand"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -248,7 +248,7 @@ func main() {
 			return
 		}
 
-		hylafaxJobID := generateJobID()
+		// hylafaxJobID := generateJobID()
 
 		uuidParts := strings.Split(fax.UUID, "-")
 		if len(uuidParts) == 0 {
@@ -298,7 +298,7 @@ func main() {
 		log.Printf("Created recv file: %s", recvLocalPath)
 
 		// Store this received fax in the tracker.
-		record := &FaxJobRecord{
+		/*record := &FaxJobRecord{
 			ReceivedUUID:  fax.UUID,
 			CallUUID:      fax.CallUUID,
 			HylafaxJobID:  hylafaxJobID,
@@ -308,11 +308,7 @@ func main() {
 			ReceivedAt:    time.Now(),
 			LastUpdatedAt: time.Now(),
 		}
-		faxRecordsMutex.Lock()
-		faxRecords[fax.CallUUID] = record
-		faxRecordsMutex.Unlock()
-		log.Printf("Tracked fax job with CallUUID: %s", fax.CallUUID)
-
+		*/
 		ctx.StatusCode(iris.StatusOK)
 	})
 
@@ -334,12 +330,12 @@ func main() {
 		// Process each fax job from the notify payload.
 		for key, job := range payload.FaxJobResults.Results {
 			faxRecordsMutex.Lock()
-			if record, exists := faxRecords[job.CallUUID]; exists {
+			if record, exists := faxRecords[job.UUID]; exists {
 				record.LastStatus = job.Status
 				record.LastUpdatedAt = time.Now()
 				log.Printf("Updated fax job %s: new status %s", key, job.Status)
 			} else {
-				log.Printf("No record found for fax job with CallUUID: %s", job.CallUUID)
+				log.Printf("No record found for fax job with UUID: %s", job.UUID)
 			}
 			faxRecordsMutex.Unlock()
 
@@ -353,11 +349,11 @@ func main() {
 					if job.Result.Success {
 						log.Printf("Notify indicates fax completed for job %s", jobUUID)
 						createStsFile(storedHylaFaxID, "7", "0", "0", "success")
-						createFile(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, fmt.Sprintf("%s.done", storedHylaFaxID)), "")
+						createFile(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, fmt.Sprintf("q%s.done", storedHylaFaxID)), "\r")
 					} else {
 						log.Printf("Notify indicates fax failed for job %s", jobUUID)
 						createStsFile(storedHylaFaxID, "3", "0", "0", "failed")
-						createFile(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, fmt.Sprintf("%s.fail", storedHylaFaxID)), "")
+						createFile(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, fmt.Sprintf("q%s.done", storedHylaFaxID)), "\r")
 					}
 					// Remove job from queue since we've processed it.
 					delete(jobQueue.entries, jobUUID)
@@ -603,7 +599,7 @@ func submitFax(faxNumber, pdfFile, pdfPath, sfcFileName string) (string, error) 
 	hylaJobID := generateJobID() // e.g. "12345678"
 
 	// Create a .jobid file with the generated Hylafax job ID.
-	err := createFile(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, fmt.Sprintf("%s.jobid", jobID)), hylaJobID)
+	err := createFile(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, fmt.Sprintf("%s.jobid", jobID)), hylaJobID+"\r")
 	if err != nil {
 		log.Printf("Error creating .jobid file: %v", err)
 		// Continue even if file creation fails.
@@ -651,7 +647,7 @@ func submitFax(faxNumber, pdfFile, pdfPath, sfcFileName string) (string, error) 
 	if err != nil {
 		log.Printf("Error sending POST request: %v", err)
 		// Create the .fail file immediately if the send fails.
-		createFile(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, fmt.Sprintf("%s.fail", hylaJobID)), "")
+		createFile(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, fmt.Sprintf("q%s.done", hylaJobID)), "\r")
 		return "", err
 	}
 	defer resp.Body.Close()
@@ -663,7 +659,7 @@ func submitFax(faxNumber, pdfFile, pdfPath, sfcFileName string) (string, error) 
 
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("POST request failed with status: %s", resp.Status)
-		createFile(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, fmt.Sprintf("%s.fail", hylaJobID)), "")
+		createFile(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, fmt.Sprintf("q%s.done", hylaJobID)), "\r")
 		return "", fmt.Errorf("fax submission failed with status: %s", resp.Status)
 	}
 
@@ -711,9 +707,17 @@ func addFaxJob(jobUUID, synergyJobID, hylafaxJobID string) {
 	log.Printf("Fax job added to queue: JobUUID=%s SynergyJobID=%s, HylaFaxJobID=%s", jobUUID, synergyJobID, hylafaxJobID)
 }
 
+// generateJobID returns the last 6 characters of a newly generated UUID.
 func generateJobID() string {
-	rand.Seed(time.Now().UnixNano())
-	return fmt.Sprintf("%s%08d", JobIDPrefix, rand.Intn(100000000))
+	// Generate a new UUID.
+	id := uuid.New().String() // Example: "123e4567-e89b-12d3-a456-426614174000"
+	// Remove hyphens.
+	id = strings.ReplaceAll(id, "-", "")
+	// Return the last 6 characters.
+	if len(id) >= 6 {
+		return id[len(id)-6:]
+	}
+	return id
 }
 
 func processStatusFile(filePath string) {
