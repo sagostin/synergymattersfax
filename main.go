@@ -548,6 +548,8 @@ func processFile(filePath string) {
 	switch ext {
 	case ".sfc":
 		handleSfcFile(filePath)
+	case ".cmd":
+		os.Remove(filePath)
 	}
 }
 
