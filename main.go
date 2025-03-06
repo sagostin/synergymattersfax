@@ -549,6 +549,7 @@ func processFile(filePath string) {
 	case ".sfc":
 		handleSfcFile(filePath)
 	case ".cmd":
+		log.Printf("removing .cmd file: %s", filePath)
 		os.Remove(filePath)
 	}
 }
