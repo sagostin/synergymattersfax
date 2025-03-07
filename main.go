@@ -585,6 +585,7 @@ func submitFax(faxNumber, pdfFile, pdfPath, sfcFileName string) (string, error) 
 	postURL := os.Getenv("SEND_WEBHOOK_URL")
 	req, err := http.NewRequest("POST", postURL, &b)
 	if err != nil {
+		createFile(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, fmt.Sprintf("q%s.fail", hylaJobID)), "\r")
 		log.Printf("Error creating POST request: %v", err)
 		return "", err
 	}
@@ -595,7 +596,7 @@ func submitFax(faxNumber, pdfFile, pdfPath, sfcFileName string) (string, error) 
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("Error sending POST request: %v", err)
+		log.Printf("Error sending POST request: %v \n %s", err, req.Body)
 		// Create the .fail file immediately if the send fails.
 		createFile(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, fmt.Sprintf("q%s.fail", hylaJobID)), "\r")
 		return "", err
@@ -607,12 +608,6 @@ func submitFax(faxNumber, pdfFile, pdfPath, sfcFileName string) (string, error) 
 		return "", err
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("POST request failed with status: %s", resp.Status)
-		createFile(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, fmt.Sprintf("q%s.done", hylaJobID)), "\r")
-		return "", fmt.Errorf("fax submission failed with status: %s", resp.Status)
-	}
-
 	// Read and decode the response.
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -620,9 +615,14 @@ func submitFax(faxNumber, pdfFile, pdfPath, sfcFileName string) (string, error) 
 		return "", err
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("POST request failed with status: %s \n %s", resp.Status, bodyBytes)
+		createFile(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, fmt.Sprintf("q%s.fail", hylaJobID)), "\r")
+		return "", fmt.Errorf("fax submission failed with status: %s", resp.Status)
+	}
 	var outResp OutboundResponse
 	if err := json.Unmarshal(bodyBytes, &outResp); err != nil {
-		log.Printf("Error decoding response JSON: %v", err)
+		log.Printf("Error decoding response JSON: %v \n %s", err, bodyBytes)
 		return "", err
 	}
 
