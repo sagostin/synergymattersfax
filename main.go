@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
@@ -11,8 +10,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	"github.com/kataras/iris/v12"
-	"goftp.io/server/v2"
-	"goftp.io/server/v2/driver/file"
 	"io"
 	"io/ioutil"
 	"log"
@@ -104,11 +101,6 @@ var jobQueue = struct {
 	entries map[string]string // synergyJobID -> hylafaxJobID
 }{entries: make(map[string]string)}
 
-// -------------------------------------
-// DATA STRUCTURES FOR PAYLOADS
-// -------------------------------------
-
-// WebhookPayload is used by /fax-notify endpoint.
 type WebhookPayload struct {
 	FaxJobResults FaxJobResults `json:"fax_job_results"`
 	FileData      string        `json:"file_data"`
@@ -376,20 +368,8 @@ func main() {
 		ctx.StatusCode(iris.StatusOK)
 	})
 
-	// -----------------------------
-	// SENDING FAXES VIA FTP & WATCHER
-	// -----------------------------
-	// The sending side uses an FTP server and a watcher on the designated directory.
-	// When a file ending with ".sfc" is detected, its content (fax number and PDF file name)
-	// is read. If the corresponding PDF is already present (or cached), the fax is submitted.
-	// The submitFax function creates a .jobid file, sends the fax via HTTP PUT (to a webhook), and
-	// creates .done or .fail files based on the result. It also adds the job to the global job queue.
-	// go startFtp()
 	go watchFaxFolder(os.Getenv("FTP_ROOT") + FaxDir)
 
-	// -----------------------------
-	// START THE WEB SERVER
-	// -----------------------------
 	app.Listen(":8080")
 	select {
 	case sig := <-sigchan:
@@ -480,37 +460,6 @@ func createStsFile(jobID, state, npages, totpages, status string) error {
 	return nil
 }
 
-// -----------------------------
-// SENDING & FTP WATCHER FUNCTIONS
-// -----------------------------
-
-func startFtp() {
-	driver, err := file.NewDriver(os.Getenv("FTP_ROOT"))
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	port, err := strconv.Atoi(os.Getenv("FTP_PORT"))
-
-	s, err := server.NewServer(&server.Options{
-		Driver: driver,
-		Auth: &server.SimpleAuth{
-			Name:     os.Getenv("FTP_USER"),
-			Password: os.Getenv("FTP_PASS"),
-		},
-		Perm:      server.NewSimplePerm("root", "root"),
-		RateLimit: 1000000, // 1MB/s limit
-		Port:      port,
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	if err := s.ListenAndServe(); err != nil {
-		log.Fatal(err)
-	}
-}
-
 func watchFaxFolder(dir string) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -593,8 +542,6 @@ type OutboundResponse struct {
 	Message string `json:"message"`
 }
 
-// submitFax sends the fax via an HTTP POST request and returns the submitted job UUID.
-// If the POST fails (or returns a non-200 response), a .fail file is created immediately.
 // submitFax sends the fax via an HTTP POST multipart/form-data request and returns the submitted job UUID.
 // If the POST fails (or returns a non-200 response), a .fail file is created immediately.
 func submitFax(faxNumber, pdfFile, pdfPath, sfcFileName string) (string, error) {
@@ -650,7 +597,7 @@ func submitFax(faxNumber, pdfFile, pdfPath, sfcFileName string) (string, error) 
 	if err != nil {
 		log.Printf("Error sending POST request: %v", err)
 		// Create the .fail file immediately if the send fails.
-		createFile(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, fmt.Sprintf("q%s.done", hylaJobID)), "\r")
+		createFile(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, fmt.Sprintf("q%s.fail", hylaJobID)), "\r")
 		return "", err
 	}
 	defer resp.Body.Close()
@@ -721,49 +668,4 @@ func generateJobID() string {
 		return id[len(id)-6:]
 	}
 	return id
-}
-
-func processStatusFile(filePath string) {
-	file, err := os.Open(filePath)
-	if err != nil {
-		log.Printf("Error opening .sts file: %v", err)
-		return
-	}
-	defer file.Close()
-
-	var state, npages, totpages, status string
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.Contains(line, "state:") {
-			state = strings.Split(line, ":")[1]
-		}
-		if strings.Contains(line, "npages:") {
-			npages = strings.Split(line, ":")[1]
-		}
-		if strings.Contains(line, "totpages:") {
-			totpages = strings.Split(line, ":")[1]
-		}
-		if strings.Contains(line, "status:") {
-			status = strings.Split(line, ":")[1]
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		log.Printf("Error reading .sts file: %v", err)
-		return
-	}
-
-	switch state {
-	case "7":
-		log.Printf("Fax completed: NPages=%s, TotPages=%s, Status=%s", npages, totpages, status)
-	case "3":
-		log.Printf("Fax status: %s (busy, ringing, etc.)", status)
-	case "6":
-		log.Printf("Fax in progress: NPages=%s, TotPages=%s", npages, totpages)
-	default:
-		log.Printf("Unknown fax state: %s", state)
-	}
-	if err := os.Remove(filePath); err != nil {
-		log.Printf("Error deleting .sts file: %v", err)
-	}
 }
