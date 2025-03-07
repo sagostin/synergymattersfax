@@ -11,11 +11,11 @@ services:
       - ./sftpgo_config:/etc/sftpgo
       - ./sftpgo_data:/var/lib/sftpgo
       - ./synergyfax_ftp:/srv/sftpgo/synergyfax_ftp
-  synergymattersfax:
-    image: synergymattersfax:latest
-    #container_name: some-sftpgo
-    ports:
-      - "8080:8080"
-    volumes:
-      - ./synergyfax_ftp:/app/synergyfax_ftp
-      - ./.env:/app/.env
+  #synergymattersfax:
+  #  image: synergymattersfax:latest
+  #  #container_name: some-sftpgo
+  #  ports:
+  #    - "8080:8080"
+  #  volumes:
+  #    - ./synergyfax_ftp:/app/synergyfax_ftp
+  #    - ./.env:/app/.env
