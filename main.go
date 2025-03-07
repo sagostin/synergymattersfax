@@ -98,8 +98,8 @@ var (
 // For sending, we can map the Synergy fax job ID (e.g. derived from an SFC filename) to the Hylafax job ID.
 var jobQueue = struct {
 	sync.Mutex
-	entries map[string]string // synergyJobID -> hylafaxJobID
-}{entries: make(map[string]string)}
+	entries map[string]jobQ // synergyJobID -> hylafaxJobID
+}{entries: make(map[string]jobQ)}
 
 type WebhookPayload struct {
 	FaxJobResults FaxJobResults `json:"fax_job_results"`
@@ -333,19 +333,23 @@ func main() {
 
 			// For outbound faxes, check if this notify corresponds to a job in our jobQueue.
 			jobQueue.Lock()
-			for jobUUID, storedHylaFaxID := range jobQueue.entries {
+			for jobUUID, jobQf := range jobQueue.entries {
 				// Assuming that you can correlate based on the fax UUID or CallUUID,
 				// here we check if the notify's UUID matches.
 				if job.UUID == jobUUID { // Adjust matching logic as needed.
 					// Based on the notify result, create .done or .fail.
 					if job.Result.Success {
 						log.Printf("Notify indicates fax completed for job %s", jobUUID)
-						createStsFile(storedHylaFaxID, "7", "0", "0", "success")
-						createFile(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, fmt.Sprintf("q%s.done", storedHylaFaxID)), "\r")
+						createStsFile(jobQf.hylaJobID, "7", "0", "0", "success")
+						createFile(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, fmt.Sprintf("q%s.done", jobQf.hylaJobID)), "\r")
+						os.Remove(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, jobQf.sfcPath))
+						os.Remove(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, jobQf.pdfPath))
 					} else {
 						log.Printf("Notify indicates fax failed for job %s", jobUUID)
-						createStsFile(storedHylaFaxID, "3", "0", "0", "failed")
-						createFile(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, fmt.Sprintf("q%s.done", storedHylaFaxID)), "\r")
+						createStsFile(jobQf.hylaJobID, "3", "0", "0", "failed")
+						createFile(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, fmt.Sprintf("q%s.fail", jobQf.hylaJobID)), "\r")
+						os.Remove(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, jobQf.sfcPath))
+						os.Remove(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, jobQf.pdfPath))
 					}
 					// Remove job from queue since we've processed it.
 					delete(jobQueue.entries, jobUUID)
@@ -599,6 +603,8 @@ func submitFax(faxNumber, pdfFile, pdfPath, sfcFileName string) (string, error) 
 		log.Printf("Error sending POST request: %v \n %s", err, req.Body)
 		// Create the .fail file immediately if the send fails.
 		createFile(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, fmt.Sprintf("q%s.fail", hylaJobID)), "\r")
+		os.Remove(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, sfcFileName))
+		os.Remove(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, pdfFile))
 		return "", err
 	}
 	defer resp.Body.Close()
@@ -618,6 +624,8 @@ func submitFax(faxNumber, pdfFile, pdfPath, sfcFileName string) (string, error) 
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("POST request failed with status: %s \n %s", resp.Status, bodyBytes)
 		createFile(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, fmt.Sprintf("q%s.fail", hylaJobID)), "\r")
+		os.Remove(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, sfcFileName))
+		os.Remove(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, pdfFile))
 		return "", fmt.Errorf("fax submission failed with status: %s", resp.Status)
 	}
 	var outResp OutboundResponse
@@ -627,9 +635,12 @@ func submitFax(faxNumber, pdfFile, pdfPath, sfcFileName string) (string, error) 
 	}
 
 	// For outbound faxes, add the job to the queue for later notify updates.
-	addFaxJob(outResp.JobUUID, jobID, hylaJobID)
+	addFaxJob(outResp.JobUUID, jobID, hylaJobID, pdfPath, filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, sfcFileName))
 	log.Printf("Fax submitted successfully: FaxNumber=%s, PDFFile=%s, JobID=%s, Returned Job UUID=%s",
 		faxNumber, pdfFile, jobID, outResp.JobUUID)
+
+	os.Remove(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, sfcFileName))
+	os.Remove(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, pdfFile))
 
 	return outResp.JobUUID, nil
 }
@@ -650,10 +661,16 @@ func createFile(filePath, content string) error {
 	return nil
 }
 
-func addFaxJob(jobUUID, synergyJobID, hylafaxJobID string) {
+type jobQ struct {
+	hylaJobID string
+	pdfPath   string
+	sfcPath   string
+}
+
+func addFaxJob(jobUUID, synergyJobID, hylafaxJobID, pdfPath, sfcFilePath string) {
 	jobQueue.Lock()
 	defer jobQueue.Unlock()
-	jobQueue.entries[jobUUID] = hylafaxJobID
+	jobQueue.entries[jobUUID] = jobQ{hylaJobID: hylafaxJobID, pdfPath: pdfPath, sfcPath: sfcFilePath}
 	log.Printf("Fax job added to queue: JobUUID=%s SynergyJobID=%s, HylaFaxJobID=%s", jobUUID, synergyJobID, hylafaxJobID)
 }
 
