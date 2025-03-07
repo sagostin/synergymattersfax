@@ -331,6 +331,9 @@ func main() {
 			}
 			faxRecordsMutex.Unlock()
 
+			success := false
+			var jobQq jobQ
+
 			// For outbound faxes, check if this notify corresponds to a job in our jobQueue.
 			jobQueue.Lock()
 			for jobUUID, jobQf := range jobQueue.entries {
@@ -339,23 +342,29 @@ func main() {
 				if job.UUID == jobUUID { // Adjust matching logic as needed.
 					// Based on the notify result, create .done or .fail.
 					if job.Result.Success {
-						log.Printf("Notify indicates fax completed for job %s", jobUUID)
-						createStsFile(jobQf.hylaJobID, "7", "0", "0", "success")
-						createFile(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, fmt.Sprintf("q%s.done", jobQf.hylaJobID)), "\r")
-						os.Remove(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, jobQf.sfcPath))
-						os.Remove(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, jobQf.pdfPath))
-					} else {
-						log.Printf("Notify indicates fax failed for job %s", jobUUID)
-						createStsFile(jobQf.hylaJobID, "3", "0", "0", "failed")
-						createFile(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, fmt.Sprintf("q%s.fail", jobQf.hylaJobID)), "\r")
-						os.Remove(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, jobQf.sfcPath))
-						os.Remove(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, jobQf.pdfPath))
+						success = true
+						jobQq = jobQf
+
+						// Remove job from queue since we've processed it.
+						delete(jobQueue.entries, jobUUID)
+						break
 					}
-					// Remove job from queue since we've processed it.
-					delete(jobQueue.entries, jobUUID)
-					break
 				}
 			}
+			if success {
+				log.Printf("Notify indicates fax completed for job %s", job.UUID)
+				createStsFile(jobQq.hylaJobID, "7", "0", "0", "success")
+				createFile(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, fmt.Sprintf("q%s.done", jobQq.hylaJobID)), "\r")
+				os.Remove(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, jobQq.sfcPath))
+				os.Remove(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, jobQq.pdfPath))
+			} else {
+				log.Printf("Notify indicates fax failed for job %s", job.UUID)
+				createStsFile(jobQq.hylaJobID, "3", "0", "0", "failed")
+				createFile(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, fmt.Sprintf("q%s.fail", jobQq.hylaJobID)), "\r")
+				os.Remove(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, jobQq.sfcPath))
+				os.Remove(filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, jobQq.pdfPath))
+			}
+
 			jobQueue.Unlock()
 		}
 
