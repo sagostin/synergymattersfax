@@ -1,0 +1,15 @@
+[Unit]
+Description=Synergy Matters Fax Server
+After=network.target local-fs.target
+
+[Service]
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/synergymattersfax
+ExecStart=/home/ubuntu/synergymattersfax/synergymatters_fax
+TimeoutSec=10s
+Restart=always
+IOSchedulingClass=realtime
+
+[Install]
+WantedBy=multi-user.target
