@@ -1,5 +1,5 @@
 # Start from a Golang base image
-FROM golang:1.24.1-alpine AS builder
+FROM golang:1.24.1-bookworm AS builder
 
 # Configure Go proxy
 ENV GOPROXY=https://proxy.golang.org,direct
@@ -19,12 +19,16 @@ COPY . .
 # Build the application
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o main .
 
-# Start a new stage from scratch
-FROM alpine:latest
+# Start a new stage with Ubuntu
+FROM ubuntu:latest
 
-# Add CA certificates and ffmpeg, then create a non-root user
-RUN apk --no-cache add ca-certificates curl && \
-    adduser -D appuser
+# Install necessary packages
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates curl tzdata && \
+    rm -rf /var/lib/apt/lists/*
+
+# Create a non-root user
+RUN useradd -m appuser
 
 # Set the working directory
 WORKDIR /app
