@@ -85,6 +85,83 @@ This will launch SFTPGo with the following port mappings:
 
 On first access, configure the SFTPGo admin user and then create additional users as needed. Make sure to set each user’s root directory to `/srv/sftpgo/synergyfax_ftp`.
 
+## Windows Standalone Deployment
+
+On Windows, you can run the fax service without Docker/SFTPGo. The FTP portion is optional and only needed for integration with other software.
+
+### Building for Windows
+
+Cross-compile from Linux/Mac:
+```bash
+GOOS=windows GOARCH=amd64 go build -o synergymatters_fax.exe .
+```
+
+Or build directly on Windows with Go installed:
+```bash
+go build -o synergymatters_fax.exe .
+```
+
+### Configuration
+
+Create a `.env` file in your deployment directory:
+
+```env
+FTP_ROOT=C:\FaxStorage
+FAX_NUMBER=TEN_DIGIT_NUMBER_HERE
+SEND_WEBHOOK_URL=http://YOUR_FAX_SERVER_URL:8080/fax/send
+SEND_WEBHOOK_USERNAME=YOUR_USERNAME_HERE
+SEND_WEBHOOK_PASSWORD=YOUR_PASSWORD_HERE
+```
+
+**Path Simplification:** To save PDFs directly to `FTP_ROOT` without a subdirectory, edit `main.go` and change line 29:
+
+```go
+FaxDir      = ""  // Set to "" to save directly to FTP_ROOT
+```
+
+With `FaxDir = ""`, faxes will be saved to `C:\FaxStorage\{UUID}{timestamp}.pdf` instead of `C:\FaxStorage\synergyfaxq\{UUID}{timestamp}.pdf`.
+
+### Running as a Windows Service with NSSM
+
+1. Download NSSM from https://nssm.cc/download
+2. Extract and note the path to `nssm.exe`
+3. Install the service:
+   ```cmd
+   nssm install SynergyFax "C:\path\to\synergymatters_fax.exe"
+   ```
+4. Configure the service:
+   - **Startup type:** Automatic
+   - **Working directory:** Your deployment folder (e.g., `C:\FaxService`)
+5. Set environment variables by editing the service or creating a `.env` file in the working directory
+6. Start the service:
+   ```cmd
+   nssm start SynergyFax
+   ```
+
+### Printer Integration
+
+Since printers can be configured to monitor a folder for files to print:
+
+1. Set `FTP_ROOT` to a network share path accessible by both the service and printer
+2. Configure your printer to monitor this folder
+3. When faxes arrive, they are saved as PDFs directly to this location and are immediately available for printing
+
+Common network share formats:
+- `\\SERVERNAME\FaxShare`
+- `\\192.168.1.100\FaxShare`
+
+### Managing the Service
+
+```cmd
+nssm start SynergyFax    # Start the service
+nssm stop SynergyFax     # Stop the service
+nssm restart SynergyFax  # Restart the service
+nssm status SynergyFax   # Check service status
+nssm edit SynergyFax     # Edit service configuration
+```
+
+View logs via Windows Event Viewer or redirect output in NSSM configuration.
+
 ## Accessing the Services
 
 - **SFTPGo Web Interface:** Accessible at `http://<SERVER_IP>:8081`

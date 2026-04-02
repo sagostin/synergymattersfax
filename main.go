@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	FaxDir      = "/synergyfaxq" // Remote FTP folder
+	FaxDir      = "/synergyfaxq" // Subdirectory for fax files (relative to FTP_ROOT). On Windows, set to "" to save directly to FTP_ROOT path.
 	JobIDPrefix = ""
 )
 
