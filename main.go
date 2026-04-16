@@ -383,7 +383,11 @@ func main() {
 
 	go watchFaxFolder(os.Getenv("FTP_ROOT") + FaxDir)
 
-	app.Listen(":8080")
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	app.Listen(":" + port)
 	select {
 	case sig := <-sigchan:
 		fmt.Print("Received ", sig, ", killing all channels")

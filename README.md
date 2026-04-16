@@ -13,6 +13,7 @@ Synergy Matters Fax Server is designed to facilitate fax sending with a robust a
 - [Go](https://golang.org/dl/) (if building directly) or Docker (if using Docker for building).
 - Docker and Docker Compose (for the SFTPGo service).
 - Ensure required ports are open:
+  - **Main Fax Service: 8080** (configurable via `PORT` in `.env`)
   - SFTPGo Web Interface: 8081
   - FTP: 21
   - Passive Ports: 50000-50100
@@ -52,7 +53,13 @@ FAX_NUMBER=TEN_DIGIT_NUMBER_HERE
 SEND_WEBHOOK_URL=http://YOUR_FAX_SERVER_URL:8080/fax/send
 SEND_WEBHOOK_USERNAME=YOUR_USERNAME_HERE
 SEND_WEBHOOK_PASSWORD=YOUR_PASSWORD_HERE
+PORT=8080
 ```
+
+**Understanding the PORT setting:**
+- The server listens on port **8080 by default**.
+- To change the port, edit `PORT=8080` in your `.env` file (e.g., `PORT=9090`).
+- If you omit the `PORT` line entirely, the server will still default to 8080.
 
 ### 4. Install and Start the Systemd Service
 
@@ -111,7 +118,13 @@ FAX_NUMBER=TEN_DIGIT_NUMBER_HERE
 SEND_WEBHOOK_URL=http://YOUR_FAX_SERVER_URL:8080/fax/send
 SEND_WEBHOOK_USERNAME=YOUR_USERNAME_HERE
 SEND_WEBHOOK_PASSWORD=YOUR_PASSWORD_HERE
+PORT=8080
 ```
+
+**Understanding the PORT setting:**
+- The server listens on port **8080 by default**.
+- To change the port, edit `PORT=8080` in your `.env` file (e.g., `PORT=9090`).
+- If you omit the `PORT` line entirely, the server will still default to 8080.
 
 **Path Simplification:** To save PDFs directly to `FTP_ROOT` without a subdirectory, edit `main.go` and change line 29:
 
@@ -164,8 +177,9 @@ View logs via Windows Event Viewer or redirect output in NSSM configuration.
 
 ## Accessing the Services
 
+- **Main Fax Service:** `http://<SERVER_IP>:8080` (default port, configurable via `PORT` env var)
 - **SFTPGo Web Interface:** Accessible at `http://<SERVER_IP>:8081`
-- **Main Fax Service:** Operates as a backend service handling fax processing and webhook communications.
+- **FTP:** Port 21 (for SFTPGo file transfers)
 
 ## Troubleshooting
 
