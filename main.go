@@ -16,6 +16,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -207,6 +208,14 @@ func main() {
 		log.Println("No .env file found; proceeding with defaults")
 	}
 
+	getEnvBool := func(key string, defaultVal bool) bool {
+		val := os.Getenv(key)
+		if val == "" {
+			return defaultVal
+		}
+		return val == "true" || val == "1"
+	}
+
 	// Shut down receiving lines when killed
 	sigchan := make(chan os.Signal, 1)
 	signal.Notify(sigchan, syscall.SIGTERM, syscall.SIGINT)
@@ -267,40 +276,33 @@ func main() {
 		}
 		log.Printf("Saved PDF file to: %s", pdfLocalPath)
 
-		loc, err := time.LoadLocation("America/Vancouver")
-		if err != nil {
-			log.Fatalf("Failed to load location: %v", err)
-		}
-		recvTime := time.Now().In(loc).Format("01/02/06 15:04")
+		if getEnvBool("PRINT_ONLY_MODE", false) {
+			if err := printPdfWithSumatraPDF(pdfLocalPath); err != nil {
+				log.Printf("SumatraPDF print failed: %v", err)
+			}
+		} else {
+			loc, err := time.LoadLocation("America/Vancouver")
+			if err != nil {
+				log.Fatalf("Failed to load location: %v", err)
+			}
+			recvTime := time.Now().In(loc).Format("01/02/06 15:04")
 
-		// Create a .recv file which will be used to signal fax receiving.
-		recvFilename := pdfName + ".recv"
-		recvLocalPath := filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, recvFilename)
-		recvContent := fmt.Sprintf("%s\n%s\n%s\n%s\n",
-			recvTime,
-			"ttyS0", // Used to correlate sessions.
-			pdfName,
-			fax.CIDNum,
-		)
-		if err := ioutil.WriteFile(recvLocalPath, []byte(recvContent), 0644); err != nil {
-			ctx.StatusCode(iris.StatusInternalServerError)
-			ctx.JSON(iris.Map{"error": "failed to write recv file: " + err.Error()})
-			return
+			recvFilename := pdfName + ".recv"
+			recvLocalPath := filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, recvFilename)
+			recvContent := fmt.Sprintf("%s\n%s\n%s\n%s\n",
+				recvTime,
+				"ttyS0",
+				pdfName,
+				fax.CIDNum,
+			)
+			if err := ioutil.WriteFile(recvLocalPath, []byte(recvContent), 0644); err != nil {
+				ctx.StatusCode(iris.StatusInternalServerError)
+				ctx.JSON(iris.Map{"error": "failed to write recv file: " + err.Error()})
+				return
+			}
+			log.Printf("Created recv file: %s", recvLocalPath)
 		}
-		log.Printf("Created recv file: %s", recvLocalPath)
 
-		// Store this received fax in the tracker.
-		/*record := &FaxJobRecord{
-			ReceivedUUID:  fax.UUID,
-			CallUUID:      fax.CallUUID,
-			HylafaxJobID:  hylafaxJobID,
-			PdfPath:       pdfLocalPath,
-			RecvPath:      recvLocalPath,
-			LastStatus:    "received",
-			ReceivedAt:    time.Now(),
-			LastUpdatedAt: time.Now(),
-		}
-		*/
 		ctx.StatusCode(iris.StatusOK)
 	})
 
@@ -395,6 +397,20 @@ func main() {
 		//logger.Logger.Print("Terminating")
 		os.Exit(0)
 	}
+}
+
+func printPdfWithSumatraPDF(pdfPath string) error {
+	sumatraPath := os.Getenv("SUMATRA_PDF_PATH")
+	if sumatraPath == "" {
+		sumatraPath = ".\\SumatraPDF.exe"
+	}
+	printerName := os.Getenv("PRINTER_NAME")
+	if printerName == "" {
+		return fmt.Errorf("PRINTER_NAME environment variable is not set")
+	}
+	cmd := exec.Command("powershell", "-Command",
+		fmt.Sprintf(`%s -print-settings landscape,fit -print-to "%s" "%s"`, sumatraPath, printerName, pdfPath))
+	return cmd.Run()
 }
 
 func createStsFile(jobID, state, npages, totpages, status string) error {
