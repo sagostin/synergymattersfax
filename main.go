@@ -383,7 +383,10 @@ func main() {
 		ctx.StatusCode(iris.StatusOK)
 	})
 
-	go watchFaxFolder(os.Getenv("FTP_ROOT") + FaxDir)
+	printOnlyMode := getEnvBool("PRINT_ONLY_MODE", false)
+	if !printOnlyMode {
+		go watchFaxFolder(os.Getenv("FTP_ROOT") + FaxDir)
+	}
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -494,6 +497,10 @@ func createStsFile(jobID, state, npages, totpages, status string) error {
 }
 
 func watchFaxFolder(dir string) {
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		log.Printf("Directory does not exist, skipping watcher: %s", dir)
+		return
+	}
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		log.Fatalf("Error creating watcher: %v", err)
@@ -527,6 +534,12 @@ func watchFaxFolder(dir string) {
 
 func processFile(filePath string) {
 	ext := strings.ToLower(filepath.Ext(filePath))
+	if ext != ".sfc" && ext != ".cmd" {
+		return
+	}
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return
+	}
 	switch ext {
 	case ".sfc":
 		handleSfcFile(filePath)
@@ -537,6 +550,9 @@ func processFile(filePath string) {
 }
 
 func handleSfcFile(filePath string) {
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return
+	}
 	content, err := os.ReadFile(filePath)
 	if err != nil {
 		log.Printf("Error reading SFC file: %v", err)
