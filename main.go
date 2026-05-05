@@ -6,10 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/fsnotify/fsnotify"
-	"github.com/google/uuid"
-	"github.com/joho/godotenv"
-	"github.com/kataras/iris/v12"
 	"io"
 	"io/ioutil"
 	"log"
@@ -24,6 +20,11 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/fsnotify/fsnotify"
+	"github.com/google/uuid"
+	"github.com/joho/godotenv"
+	"github.com/kataras/iris/v12"
 )
 
 const (
@@ -412,7 +413,7 @@ func printPdfWithSumatraPDF(pdfPath string) error {
 		return fmt.Errorf("PRINTER_NAME environment variable is not set")
 	}
 	cmd := exec.Command("powershell", "-Command",
-		fmt.Sprintf(`%s -print-settings landscape,fit -print-to "%s" "%s"`, sumatraPath, printerName, pdfPath))
+		fmt.Sprintf(`%s -print-settings simplex,fit -print-to "%s" "%s"`, sumatraPath, printerName, pdfPath))
 	return cmd.Run()
 }
 
