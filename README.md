@@ -54,6 +54,7 @@ SEND_WEBHOOK_URL=http://YOUR_FAX_SERVER_URL:8080/fax/send
 SEND_WEBHOOK_USERNAME=YOUR_USERNAME_HERE
 SEND_WEBHOOK_PASSWORD=YOUR_PASSWORD_HERE
 PORT=8080
+SUMATRA_PDF_PATH=./SumatraPDF.exe   # Windows-only; ignored on Linux
 ```
 
 **Understanding the PORT setting:**
@@ -119,6 +120,7 @@ SEND_WEBHOOK_URL=http://YOUR_FAX_SERVER_URL:8080/fax/send
 SEND_WEBHOOK_USERNAME=YOUR_USERNAME_HERE
 SEND_WEBHOOK_PASSWORD=YOUR_PASSWORD_HERE
 PORT=8080
+SUMATRA_PDF_PATH=C:\Path\To\SumatraPDF.exe
 ```
 
 **Understanding the PORT setting:**
@@ -162,6 +164,41 @@ Since printers can be configured to monitor a folder for files to print:
 Common network share formats:
 - `\\SERVERNAME\FaxShare`
 - `\\192.168.1.100\FaxShare`
+
+### SumatraPDF (Windows Printing)
+
+The Windows service uses SumatraPDF to silently print received faxes
+(`-print-settings simplex,fit,monochrome -print-to "<printer>"`).
+
+#### Quick install (portable)
+
+1. Download the **portable** version from
+   <https://www.sumatrapdfreader.org/download-free-pdf-viewer>
+   (look for the small "Portable" download — the 64-bit installer is
+   not what you want).
+2. Extract the zip. Inside you will find `SumatraPDF.exe` (along with
+   a handful of supporting DLLs and translation files — keep them all
+   together).
+3. Either:
+   - **Drop it in the service's working directory** (the directory you
+     set as NSSM's "Working directory", e.g. `C:\FaxService`). Then no
+     `SUMATRA_PDF_PATH` configuration is needed — the service will
+     find `.\SumatraPDF.exe` automatically.
+   - **Or** place it anywhere you like (e.g. `C:\Tools\SumatraPDF\`)
+     and set `SUMATRA_PDF_PATH` in `.env` to the absolute path of
+     `SumatraPDF.exe`.
+
+#### Why this matters under NSSM
+
+If `SUMATRA_PDF_PATH` is unset, the service falls back to
+`.\SumatraPDF.exe` — resolved relative to the *current working
+directory* of the running process. Under NSSM that is whatever you set
+as the service's "Working directory", which is often *not* where you
+unpacked SumatraPDF. Setting `SUMATRA_PDF_PATH` to an absolute path —
+or simply dropping `SumatraPDF.exe` into that working directory —
+avoids silent print failures.
+
+Linux ignores this variable entirely.
 
 ### Managing the Service
 
