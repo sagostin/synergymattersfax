@@ -4,13 +4,27 @@ Synergy Matters Fax Server is designed to facilitate fax sending with a robust a
 
 ## Architecture Overview
 
-- **Main Fax Service:** Runs as a systemd service on the host. It handles fax processing and webhook integrations.
-- **SFTP Server (SFTPGo):** Managed via Docker Compose, providing FTP/SFTP access for fax file storage and transfers.
+The service ships in two deployment shapes:
+
+- **Linux production (default)** — A Linux systemd unit runs the Go
+  binary directly on the host. An SFTPGo container (Docker Compose)
+  provides FTP/SFTP access to the same `FTP_ROOT` for downstream
+  integrations (folder-monitor printers, file pickup scripts, etc.).
+- **Windows standalone** — The same Go binary cross-compiled to
+  Windows. Optional: SumatraPDF for direct printer integration
+  (`PRINT_ONLY_MODE=true`). No Docker, no SFTPGo — the FTP portion is
+  only needed for downstream software integration.
+
+Both shapes share the same HTTP webhook contract (`POST /fax-receive`
++ `POST /fax-notify`) and the same HylaFax-compatible `.sfc` / `.recv`
+file handoff. The full env-var matrix lives in the `.env` blocks
+under [Installation](#installation) and [Windows Standalone
+Deployment](#windows-standalone-deployment).
 
 ## Prerequisites
 
 - A Linux system with systemd support.
-- [Go](https://golang.org/dl/) (if building directly) or Docker (if using Docker for building).
+- [Go](https://golang.org/dl/) (v1.23.2 or later, per `go.mod` — if building directly) or Docker (if using Docker for building).
 - Docker and Docker Compose (for the SFTPGo service).
 - Ensure required ports are open:
   - **Main Fax Service: 8080** (configurable via `PORT` in `.env`)
@@ -31,7 +45,7 @@ cd synergymattersfax
 You have two options to build the main service binary:
 
 #### Option A: Build on the Host
-Ensure Go (v1.24.1 or later) is installed and run:
+Ensure Go (v1.23.2 or later, matching `go.mod`) is installed and run:
 ```bash
 go build -o synergymatters_fax .
 ```
@@ -135,13 +149,13 @@ FAX_CLEANUP_INTERVAL_MINUTES=60
 - To change the port, edit `PORT=8080` in your `.env` file (e.g., `PORT=9090`).
 - If you omit the `PORT` line entirely, the server will still default to 8080.
 
-**Path Simplification:** To save PDFs directly to `FTP_ROOT` without a subdirectory, edit `main.go` and change line 29:
+**Path Simplification:** To save PDFs directly to `FTP_ROOT` without a subdirectory, edit `main.go` and change line 31:
 
 ```go
 FaxDir      = ""  // Set to "" to save directly to FTP_ROOT
 ```
 
-With `FaxDir = ""`, faxes will be saved to `C:\FaxStorage\{UUID}{timestamp}.pdf` instead of `C:\FaxStorage\synergyfaxq\{UUID}{timestamp}.pdf`.
+With `FaxDir = ""`, faxes will be saved to `C:\FaxStorage\{UUID}{timestamp}.pdf` instead of `C:\FaxStorage\synergyfaxq\{UUID}{timestamp}.pdf`. (Same applies on Linux.)
 
 ### Running as a Windows Service with Servy
 
@@ -209,6 +223,11 @@ ttyS0                <- hardcoded device identifier
 {baseName}timestamp  <- PDF base name (without .pdf extension)
 caller ID number     <- CIDNum from the inbound webhook payload
 ```
+
+> ⚠️ **The timestamp is hardcoded to `America/Vancouver`** at
+> `main.go:294`, not driven by the server's local timezone. If you run
+> the service elsewhere and need timestamps in another zone, edit that
+> line. There is no env var for this.
 
 Downstream tools that already consume HylaFax `.recv` files can pick
 this up unchanged. The file is **not** written when
@@ -479,14 +498,36 @@ The sweeper uses each file's modification time (`mtime`):
 ## Troubleshooting
 
 - Verify that your `.env` file is correctly configured.
-- For systemd service logs, run:
+- **Linux service logs:**
   ```bash
   sudo journalctl -u synergymattersfax -f
   ```
-- For Docker Compose logs:
+- **Docker Compose logs:**
   ```bash
   sudo docker compose logs
   ```
+- **Windows service logs (Servy):** use the Servy Manager app's
+  "Console" tab for live stdout/stderr preview, or read the configured
+  log files (set under Servy → Process → Log output in the GUI).
+  Falls back to Windows Event Viewer → Windows Logs → Application.
+- **"PDF printed but not deleted after retention"** — the cleanup
+  sweeper only touches files older than `FAX_RETENTION_HOURS`. Watch
+  the service log for `Cleanup: removed ...` to confirm it's running.
+- **"PRINT_ONLY_MODE=true on Linux"** — expected to be a no-op
+  (powershell shell-out fails, failure is logged). Leave it `false`
+  on Linux.
+- **"`.sfc` file sits in the watched directory forever"** — almost
+  always means `PRINT_ONLY_MODE=true`. The watcher is intentionally
+  not started in that mode. See the warning at the top of the
+  **PRINT_ONLY_MODE** section.
+- **"SumatraPDF print fails silently"** — check the service log for
+  `SumatraPDF print failed: <reason>`. Most common cause is
+  `PRINTER_NAME` not matching exactly (case-sensitive on Windows), or
+  `SUMATRA_PDF_PATH` pointing at a path the service can't read.
+- **"SFTPGo user can't see files"** — confirm each user's root
+  directory in the SFTPGo admin UI is set to
+  `/srv/sftpgo/synergyfax_ftp` (matches the `docker-compose.yml`
+  bind mount).
 
 ## License
 
