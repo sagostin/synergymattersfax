@@ -413,7 +413,7 @@ func printPdfWithSumatraPDF(pdfPath string) error {
 		return fmt.Errorf("PRINTER_NAME environment variable is not set")
 	}
 	cmd := exec.Command("powershell", "-Command",
-		fmt.Sprintf(`%s -print-settings simplex,fit -print-to "%s" "%s"`, sumatraPath, printerName, pdfPath))
+		fmt.Sprintf(`%s -print-settings simplex,fit,monochrome -print-to "%s" "%s"`, sumatraPath, printerName, pdfPath))
 	return cmd.Run()
 }
 
