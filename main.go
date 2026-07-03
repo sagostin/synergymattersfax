@@ -6,16 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/fsnotify/fsnotify"
-	"github.com/google/uuid"
-	"github.com/joho/godotenv"
-	"github.com/kataras/iris/v12"
 	"io"
 	"io/ioutil"
 	"log"
 	"mime/multipart"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -23,6 +20,11 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/fsnotify/fsnotify"
+	"github.com/google/uuid"
+	"github.com/joho/godotenv"
+	"github.com/kataras/iris/v12"
 )
 
 const (
@@ -207,6 +209,14 @@ func main() {
 		log.Println("No .env file found; proceeding with defaults")
 	}
 
+	getEnvBool := func(key string, defaultVal bool) bool {
+		val := os.Getenv(key)
+		if val == "" {
+			return defaultVal
+		}
+		return val == "true" || val == "1"
+	}
+
 	// Shut down receiving lines when killed
 	sigchan := make(chan os.Signal, 1)
 	signal.Notify(sigchan, syscall.SIGTERM, syscall.SIGINT)
@@ -267,40 +277,42 @@ func main() {
 		}
 		log.Printf("Saved PDF file to: %s", pdfLocalPath)
 
-		loc, err := time.LoadLocation("America/Vancouver")
-		if err != nil {
-			log.Fatalf("Failed to load location: %v", err)
-		}
-		recvTime := time.Now().In(loc).Format("01/02/06 15:04")
+		if getEnvBool("PRINT_ONLY_MODE", false) {
+			if err := printPdfWithSumatraPDF(pdfLocalPath); err != nil {
+				log.Printf("SumatraPDF print failed: %v", err)
+			} else {
+				// Successful print: reset mtime so the cleanup sweeper
+				// counts retention from "after print" rather than from
+				// receipt. Failed prints keep their original mtime and
+				// therefore survive longer for debugging/retry.
+				now := time.Now()
+				if err := os.Chtimes(pdfLocalPath, now, now); err != nil {
+					log.Printf("Failed to update mtime after print: %v", err)
+				}
+			}
+		} else {
+			loc, err := time.LoadLocation("America/Vancouver")
+			if err != nil {
+				log.Fatalf("Failed to load location: %v", err)
+			}
+			recvTime := time.Now().In(loc).Format("01/02/06 15:04")
 
-		// Create a .recv file which will be used to signal fax receiving.
-		recvFilename := pdfName + ".recv"
-		recvLocalPath := filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, recvFilename)
-		recvContent := fmt.Sprintf("%s\n%s\n%s\n%s\n",
-			recvTime,
-			"ttyS0", // Used to correlate sessions.
-			pdfName,
-			fax.CIDNum,
-		)
-		if err := ioutil.WriteFile(recvLocalPath, []byte(recvContent), 0644); err != nil {
-			ctx.StatusCode(iris.StatusInternalServerError)
-			ctx.JSON(iris.Map{"error": "failed to write recv file: " + err.Error()})
-			return
+			recvFilename := pdfName + ".recv"
+			recvLocalPath := filepath.Join(os.Getenv("FTP_ROOT")+FaxDir, recvFilename)
+			recvContent := fmt.Sprintf("%s\n%s\n%s\n%s\n",
+				recvTime,
+				"ttyS0",
+				pdfName,
+				fax.CIDNum,
+			)
+			if err := ioutil.WriteFile(recvLocalPath, []byte(recvContent), 0644); err != nil {
+				ctx.StatusCode(iris.StatusInternalServerError)
+				ctx.JSON(iris.Map{"error": "failed to write recv file: " + err.Error()})
+				return
+			}
+			log.Printf("Created recv file: %s", recvLocalPath)
 		}
-		log.Printf("Created recv file: %s", recvLocalPath)
 
-		// Store this received fax in the tracker.
-		/*record := &FaxJobRecord{
-			ReceivedUUID:  fax.UUID,
-			CallUUID:      fax.CallUUID,
-			HylafaxJobID:  hylafaxJobID,
-			PdfPath:       pdfLocalPath,
-			RecvPath:      recvLocalPath,
-			LastStatus:    "received",
-			ReceivedAt:    time.Now(),
-			LastUpdatedAt: time.Now(),
-		}
-		*/
 		ctx.StatusCode(iris.StatusOK)
 	})
 
@@ -381,7 +393,35 @@ func main() {
 		ctx.StatusCode(iris.StatusOK)
 	})
 
-	go watchFaxFolder(os.Getenv("FTP_ROOT") + FaxDir)
+	printOnlyMode := getEnvBool("PRINT_ONLY_MODE", false)
+	if !printOnlyMode {
+		go watchFaxFolder(os.Getenv("FTP_ROOT") + FaxDir)
+	}
+
+	// Background cleanup of old received faxes. Controlled by
+	// FAX_RETENTION_HOURS (default 24) and FAX_CLEANUP_INTERVAL_MINUTES
+	// (default 60). Set FAX_RETENTION_HOURS=0 to disable.
+	retentionHours := 24
+	if v := os.Getenv("FAX_RETENTION_HOURS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			retentionHours = n
+		}
+	}
+	cleanupIntervalMin := 60
+	if v := os.Getenv("FAX_CLEANUP_INTERVAL_MINUTES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cleanupIntervalMin = n
+		}
+	}
+	if retentionHours > 0 {
+		go cleanupOldFaxes(
+			os.Getenv("FTP_ROOT")+FaxDir,
+			time.Duration(retentionHours)*time.Hour,
+			time.Duration(cleanupIntervalMin)*time.Minute,
+		)
+	} else {
+		log.Printf("Fax cleanup disabled (FAX_RETENTION_HOURS=0); received PDFs will accumulate indefinitely")
+	}
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -395,6 +435,20 @@ func main() {
 		//logger.Logger.Print("Terminating")
 		os.Exit(0)
 	}
+}
+
+func printPdfWithSumatraPDF(pdfPath string) error {
+	sumatraPath := os.Getenv("SUMATRA_PDF_PATH")
+	if sumatraPath == "" {
+		sumatraPath = ".\\SumatraPDF.exe"
+	}
+	printerName := os.Getenv("PRINTER_NAME")
+	if printerName == "" {
+		return fmt.Errorf("PRINTER_NAME environment variable is not set")
+	}
+	cmd := exec.Command("powershell", "-Command",
+		fmt.Sprintf(`%s -print-settings simplex,fit,monochrome -print-to "%s" "%s"`, sumatraPath, printerName, pdfPath))
+	return cmd.Run()
 }
 
 func createStsFile(jobID, state, npages, totpages, status string) error {
@@ -478,6 +532,10 @@ func createStsFile(jobID, state, npages, totpages, status string) error {
 }
 
 func watchFaxFolder(dir string) {
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		log.Printf("Directory does not exist, skipping watcher: %s", dir)
+		return
+	}
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		log.Fatalf("Error creating watcher: %v", err)
@@ -511,6 +569,12 @@ func watchFaxFolder(dir string) {
 
 func processFile(filePath string) {
 	ext := strings.ToLower(filepath.Ext(filePath))
+	if ext != ".sfc" && ext != ".cmd" {
+		return
+	}
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return
+	}
 	switch ext {
 	case ".sfc":
 		handleSfcFile(filePath)
@@ -521,6 +585,9 @@ func processFile(filePath string) {
 }
 
 func handleSfcFile(filePath string) {
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return
+	}
 	content, err := os.ReadFile(filePath)
 	if err != nil {
 		log.Printf("Error reading SFC file: %v", err)
@@ -698,4 +765,65 @@ func generateJobID() string {
 		return id[len(id)-6:]
 	}
 	return id
+}
+
+// cleanupOldFaxes periodically deletes received `.pdf` and `.recv` files
+// in `dir` whose modification time is older than `retention`. Runs once
+// on startup, then every `interval`. In PRINT_ONLY_MODE, files have
+// their mtime reset to "now" after a successful print, so the timer is
+// effectively "retention after print" in that mode and "retention after
+// receipt" in the default mode. Locked files (e.g. currently being
+// printed or read by a downstream tool) fail to delete and are retried
+// on the next sweep.
+func cleanupOldFaxes(dir string, retention, interval time.Duration) {
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		log.Printf("Cleanup: directory %s does not exist; sweeper exiting", dir)
+		return
+	}
+
+	log.Printf("Cleanup: sweeping %s every %s, removing files older than %s", dir, interval, retention)
+
+	runOnce := func() {
+		cutoff := time.Now().Add(-retention)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			log.Printf("Cleanup: failed to read directory %s: %v", dir, err)
+			return
+		}
+		removed := 0
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := strings.ToLower(entry.Name())
+			if !strings.HasSuffix(name, ".pdf") && !strings.HasSuffix(name, ".recv") {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			if !info.ModTime().Before(cutoff) {
+				continue
+			}
+			fullPath := filepath.Join(dir, entry.Name())
+			if err := os.Remove(fullPath); err != nil {
+				log.Printf("Cleanup: failed to remove %s: %v", fullPath, err)
+				continue
+			}
+			log.Printf("Cleanup: removed %s (mtime %s, cutoff %s)",
+				fullPath, info.ModTime().Format(time.RFC3339), cutoff.Format(time.RFC3339))
+			removed++
+		}
+		if removed > 0 {
+			log.Printf("Cleanup: removed %d file(s) from %s", removed, dir)
+		}
+	}
+
+	runOnce()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for range ticker.C {
+		runOnce()
+	}
 }

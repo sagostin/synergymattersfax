@@ -1,3 +1,11 @@
 .env
 sftpgo_data
 synergyfax_ftp/synergyfaxq
+
+# IDE
+.idea/
+
+# Build artifacts
+synergymatters_fax
+synergymattersfax
+*.exe
