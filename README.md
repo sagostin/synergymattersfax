@@ -136,22 +136,47 @@ FaxDir      = ""  // Set to "" to save directly to FTP_ROOT
 
 With `FaxDir = ""`, faxes will be saved to `C:\FaxStorage\{UUID}{timestamp}.pdf` instead of `C:\FaxStorage\synergyfaxq\{UUID}{timestamp}.pdf`.
 
-### Running as a Windows Service with NSSM
+### Running as a Windows Service with Servy
 
-1. Download NSSM from https://nssm.cc/download
-2. Extract and note the path to `nssm.exe`
-3. Install the service:
+[Servy](https://github.com/aelassas/servy) is a modern Windows service
+wrapper that bundles a GUI app, a CLI (`servy-cli`), and a PowerShell
+module. It is a drop-in alternative to NSSM with better logging, health
+checks, and process monitoring.
+
+1. Install Servy (any one of these):
    ```cmd
-   nssm install SynergyFax "C:\path\to\synergymatters_fax.exe"
+   winget install servy
+   :: or
+   choco install -y servy
+   :: or
+   scoop install servy
    ```
-4. Configure the service:
+   Or download the latest release from
+   <https://github.com/aelassas/servy/releases/latest>.
+2. Open the Servy desktop app, **or** use the CLI from an **elevated**
+   Command Prompt / PowerShell:
+   ```cmd
+   servy-cli install ^
+     --name="SynergyFax" ^
+     --path="C:\FaxService\synergymatters_fax.exe" ^
+     --startupDir="C:\FaxService"
+   ```
+   The startup directory is what becomes the working directory for the
+   wrapped process — Servy picks up `.env` from that folder.
+3. In the Servy UI (or via `servy-cli set ...`), confirm:
    - **Startup type:** Automatic
-   - **Working directory:** Your deployment folder (e.g., `C:\FaxService`)
-5. Set environment variables by editing the service or creating a `.env` file in the working directory
-6. Start the service:
+   - **Working directory / startup dir:** `C:\FaxService`
+   - Environment variables are read from `.env` in the startup
+     directory automatically — no extra config needed.
+4. Start the service:
    ```cmd
-   nssm start SynergyFax
+   servy-cli start --name="SynergyFax"
+   :: or, from an elevated prompt:
+   sc.exe start SynergyFax
    ```
+
+See the [Servy wiki](https://github.com/aelassas/servy/wiki) for full
+options (process priority, log rotation, pre/post-launch hooks, etc.).
 
 ### Printer Integration
 
@@ -180,37 +205,44 @@ The Windows service uses SumatraPDF to silently print received faxes
    a handful of supporting DLLs and translation files — keep them all
    together).
 3. Either:
-   - **Drop it in the service's working directory** (the directory you
-     set as NSSM's "Working directory", e.g. `C:\FaxService`). Then no
-     `SUMATRA_PDF_PATH` configuration is needed — the service will
-     find `.\SumatraPDF.exe` automatically.
+   - **Drop it in the service's working directory** (the startup dir you
+     set in Servy, e.g. `C:\FaxService`). Then no `SUMATRA_PDF_PATH`
+     configuration is needed — the service will find `.\SumatraPDF.exe`
+     automatically.
    - **Or** place it anywhere you like (e.g. `C:\Tools\SumatraPDF\`)
      and set `SUMATRA_PDF_PATH` in `.env` to the absolute path of
      `SumatraPDF.exe`.
 
-#### Why this matters under NSSM
+#### Why this matters under Servy
 
 If `SUMATRA_PDF_PATH` is unset, the service falls back to
 `.\SumatraPDF.exe` — resolved relative to the *current working
-directory* of the running process. Under NSSM that is whatever you set
-as the service's "Working directory", which is often *not* where you
-unpacked SumatraPDF. Setting `SUMATRA_PDF_PATH` to an absolute path —
-or simply dropping `SumatraPDF.exe` into that working directory —
-avoids silent print failures.
+directory* of the running process. Under Servy that is whatever you set
+as `--startupDir` (or the "Working directory" in the GUI), which is
+often *not* where you unpacked SumatraPDF. Setting `SUMATRA_PDF_PATH`
+to an absolute path — or simply dropping `SumatraPDF.exe` into that
+startup directory — avoids silent print failures.
 
 Linux ignores this variable entirely.
 
 ### Managing the Service
 
 ```cmd
-nssm start SynergyFax    # Start the service
-nssm stop SynergyFax     # Stop the service
-nssm restart SynergyFax  # Restart the service
-nssm status SynergyFax   # Check service status
-nssm edit SynergyFax     # Edit service configuration
+servy-cli start   --name="SynergyFax"    :: Start the service
+servy-cli stop    --name="SynergyFax"    :: Stop the service
+servy-cli restart --name="SynergyFax"    :: Restart the service
+servy-cli status  --name="SynergyFax"    :: Check service status
+sc.exe start  SynergyFax                  :: Start (any elevated prompt)
+sc.exe stop   SynergyFax                  :: Stop  (any elevated prompt)
+sc.exe query  SynergyFax                  :: Status (any elevated prompt)
 ```
 
-View logs via Windows Event Viewer or redirect output in NSSM configuration.
+You can also manage the service visually through the **Servy Manager**
+app (ships with Servy) — it shows live CPU/RAM graphs, stdout/stderr
+preview, and lets you browse rotated log files.
+
+View logs via Windows Event Viewer, the Servy Manager app, or by
+configuring stdout/stderr redirection in Servy.
 
 ## Accessing the Services
 
