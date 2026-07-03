@@ -55,6 +55,9 @@ SEND_WEBHOOK_USERNAME=YOUR_USERNAME_HERE
 SEND_WEBHOOK_PASSWORD=YOUR_PASSWORD_HERE
 PORT=8080
 SUMATRA_PDF_PATH=./SumatraPDF.exe   # Windows-only; ignored on Linux
+PRINT_ONLY_MODE=false               # Windows-only; harmless no-op on Linux
+FAX_RETENTION_HOURS=24              # 0 disables cleanup; received PDFs accumulate forever otherwise
+FAX_CLEANUP_INTERVAL_MINUTES=60     # How often the cleanup sweeper runs
 ```
 
 **Understanding the PORT setting:**
@@ -121,6 +124,10 @@ SEND_WEBHOOK_USERNAME=YOUR_USERNAME_HERE
 SEND_WEBHOOK_PASSWORD=YOUR_PASSWORD_HERE
 PORT=8080
 SUMATRA_PDF_PATH=C:\Path\To\SumatraPDF.exe
+PRINT_ONLY_MODE=false
+PRINTER_NAME=Your Printer Name Here
+FAX_RETENTION_HOURS=24
+FAX_CLEANUP_INTERVAL_MINUTES=60
 ```
 
 **Understanding the PORT setting:**
@@ -190,6 +197,98 @@ Common network share formats:
 - `\\SERVERNAME\FaxShare`
 - `\\192.168.1.100\FaxShare`
 
+#### `.recv` file format
+
+For each received fax the service writes a HylaFax-compatible `.recv`
+file next to the PDF in `FTP_ROOT` (or `FTP_ROOT\synergyfaxq\` if the
+default `FaxDir` is in use). The file is plain text, four lines:
+
+```
+MM/DD/YY HH:MM       <- receive time, America/Vancouver timezone
+ttyS0                <- hardcoded device identifier
+{baseName}timestamp  <- PDF base name (without .pdf extension)
+caller ID number     <- CIDNum from the inbound webhook payload
+```
+
+Downstream tools that already consume HylaFax `.recv` files can pick
+this up unchanged. The file is **not** written when
+`PRINT_ONLY_MODE=true`.
+
+The `synergyfaxq` subdirectory is auto-created on first receive via
+`os.MkdirAll` — if you point an SFTPGo user root at `FTP_ROOT` you do
+not need to pre-create it.
+
+### PRINT_ONLY_MODE (Windows Direct Printing)
+
+> ⚠️ **PRINT_ONLY_MODE = receive-only.** When this flag is `true`, the
+> background folder watcher that drives outbound faxing (`.sfc` files
+> dropped into `FTP_ROOT/synergyfaxq/`) is **not started**. Faxes can
+> still be **received** via `POST /fax-receive`, but **sending** via
+> the HylaFax-style `.sfc` handoff will silently no-op — the `.sfc`
+> file will sit in the directory forever, nothing will be submitted to
+> `SEND_WEBHOOK_URL`, and no error will be logged. If you need
+> outbound faxing on Windows, leave this `false` (you can still pair
+> it with a printer's folder-monitor against `FTP_ROOT`, or just print
+> the PDFs out-of-band).
+
+`PRINT_ONLY_MODE` switches the **Windows** build from the standard
+`.recv`-file handoff to a direct-to-printer workflow. By default
+(`false`), every received fax writes a `{name}.recv` metadata file
+alongside the PDF in `FTP_ROOT` — this is what triggers downstream
+fax-receipt integration (status emails, archiving, etc.). When
+`PRINT_ONLY_MODE=true`, that `.recv` file is **not** written; instead
+the service hands the PDF straight to a Windows printer via SumatraPDF.
+
+> **Note:** even with `PRINT_ONLY_MODE=true`, the PDF is **still
+> written to disk first** (`FTP_ROOT/synergyfaxq/` by default), and
+> SumatraPDF prints it from that path. `FTP_ROOT` must still point at
+> a writable directory on the fax server — the service does not have
+> a "print-only, no disk" mode. If `FTP_ROOT` is a network share or
+> path you wanted to avoid, you'll need to either accept the local
+> write or modify `main.go` to print from a buffer instead.
+>
+> Disk usage is bounded by `FAX_RETENTION_HOURS` — see the
+> [Fax Retention / Cleanup](#fax-retention--cleanup) section.
+
+#### When to use it
+
+- You're deploying **Windows standalone** (no SFTPGo, no shared FTP
+  folder, no downstream integration that consumes the `.recv` file).
+- You want received faxes to print on a local/network printer
+  immediately, with no folder-monitor polling delay.
+- Your printer is reachable from the fax server by name (e.g.
+  `\\PRINTSERVER\Office-Laserjet` or whatever shows up in
+  `Printers & Scanners`).
+
+If instead you point `FTP_ROOT` at a network share and let your
+printer's folder-monitor pick up the PDFs (see "Printer Integration"
+above), leave `PRINT_ONLY_MODE=false` — the `.recv` file is harmless
+and the direct-print path is redundant.
+
+#### Required configuration
+
+With `PRINT_ONLY_MODE=true` you also need:
+
+| Variable          | Required | Notes                                                      |
+| ----------------- | -------- | ---------------------------------------------------------- |
+| `PRINTER_NAME`    | Yes      | Exact Windows printer name (e.g. `HP LaserJet Pro M404`).  |
+| `SUMATRA_PDF_PATH`| Yes*     | Path to `SumatraPDF.exe` (defaults to `.\SumatraPDF.exe`). |
+| `FTP_ROOT`        | Yes      | Where the PDF is saved before printing.                    |
+
+`*` Strongly recommended to set explicitly — see the SumatraPDF
+section below.
+
+The PDF is printed with `-print-settings simplex,fit,monochrome`, so
+every fax lands as a single black-and-white page fitted to the print
+area, regardless of how the original PDF was authored.
+
+#### Linux behavior
+
+On Linux, `PRINT_ONLY_MODE` is a harmless no-op: the underlying print
+helper shells out to `powershell` (Windows-only), the call fails, the
+failure is logged, and the service continues. Leave it `false` on
+Linux — Linux deployments rely on the `.recv` file flow.
+
 ### SumatraPDF (Windows Printing)
 
 The Windows service uses SumatraPDF to silently print received faxes
@@ -243,6 +342,133 @@ preview, and lets you browse rotated log files.
 
 View logs via Windows Event Viewer, the Servy Manager app, or by
 configuring stdout/stderr redirection in Servy.
+
+## Outbound Sending (`.sfc` Handoff)
+
+When `PRINT_ONLY_MODE` is `false` (default — the only mode where this
+is wired up), the service runs a background watcher over
+`FTP_ROOT/synergyfaxq/` (or `FTP_ROOT/` if you've changed `FaxDir` to
+`""`). It implements a HylaFax-compatible send handoff:
+
+1. A client drops two files into the watched directory:
+   - `{jobID}.sfc` — a 2-line text file: line 1 is the destination
+     fax number, line 2 is the PDF filename to send.
+   - `{pdfFile}.pdf` — the PDF document to fax.
+2. The watcher picks the `.sfc` up, writes a `{jobID}.jobid` file
+   containing a Hylafax-style numeric job ID, and POSTs the PDF (as
+   multipart form data) to `SEND_WEBHOOK_URL` with HTTP Basic Auth
+   using `SEND_WEBHOOK_USERNAME` / `SEND_WEBHOOK_PASSWORD`.
+   `FAX_NUMBER` is sent as the caller ID.
+3. The upstream fax service is expected to call back to
+   `POST /fax-notify` with the job's eventual status.
+4. On success the service writes `q{jobID}.sts` and `q{jobID}.done`,
+   and removes the `.sfc` and `.pdf`. On failure it writes
+   `q{jobID}.fail` and removes the input files.
+
+### Required env vars for outbound
+
+| Variable                | Required | Notes                                             |
+| ----------------------- | -------- | ------------------------------------------------- |
+| `FTP_ROOT`              | Yes      | Where `.sfc`/`.pdf` files are dropped & status files are written. |
+| `FAX_NUMBER`            | Yes      | Caller-ID sent as `caller_number` on outbound.    |
+| `SEND_WEBHOOK_URL`      | Yes      | The upstream fax service endpoint (e.g. `http://provider.example/fax/send`). |
+| `SEND_WEBHOOK_USERNAME` | Yes      | HTTP Basic Auth username.                         |
+| `SEND_WEBHOOK_PASSWORD` | Yes      | HTTP Basic Auth password.                         |
+| `PRINT_ONLY_MODE`       | Yes (must be `false`) | Disables this entire watcher.               |
+
+### Status file lifecycle
+
+| File                  | When written                                | Content            |
+| --------------------- | ------------------------------------------- | ------------------ |
+| `{jobID}.jobid`       | After `.sfc` is consumed                    | Hylafax job ID + `\r` |
+| `q{jobID}.sts`        | After upstream POST returns / on notify     | Status code + text |
+| `q{jobID}.done`       | On successful completion (notify confirms)  | `\r`               |
+| `q{jobID}.fail`       | On upstream POST failure / failed notify    | `\r`               |
+
+If you want outbound sending on Windows, leave `PRINT_ONLY_MODE=false`
+— see the warning at the top of the **PRINT_ONLY_MODE** section.
+
+## HTTP API
+
+The service listens on `PORT` (default `8080`) and exposes two
+endpoints. Both expect `Content-Type: application/json`. Webhook
+authentication (where used) is HTTP Basic Auth via
+`SEND_WEBHOOK_USERNAME` / `SEND_WEBHOOK_PASSWORD`.
+
+### `POST /fax-receive`
+
+Inbound webhook called by the upstream fax service when a fax is
+received. The request body is a JSON `FaxReceive` payload (base64-
+encoded PDF in the `file_data` field, plus metadata: `uuid`, `cidnum`,
+`filename`, etc.).
+
+Behavior:
+- Saves the PDF to `FTP_ROOT/synergyfaxq/{baseName}{timestamp}.pdf`
+  (auto-creates the subdirectory).
+- If `PRINT_ONLY_MODE=false`: also writes a `.recv` metadata file
+  alongside the PDF (see [`.recv` file format](#recv-file-format)).
+- If `PRINT_ONLY_MODE=true`: prints the PDF via SumatraPDF instead
+  of writing `.recv`.
+- Returns `200 OK` on success, `4xx`/`5xx` on validation or I/O errors.
+
+### `POST /fax-notify`
+
+Inbound webhook called by the upstream fax service when an outbound
+fax's status changes. The request body is a JSON `WebhookPayload`
+containing a `fax_job_results.results` map (keyed by job UUID, with
+`status`, `result.success`, etc.) and a top-level `fax_job.calluuid`.
+
+Behavior:
+- Updates the in-memory job record (`LastStatus`, `LastUpdatedAt`).
+- On success: writes `q{jobID}.sts` + `q{jobID}.done`, removes the
+  original `.sfc` and `.pdf`.
+- On failure: writes `q{jobID}.sts` + `q{jobID}.fail`, removes the
+  original `.sfc` and `.pdf`.
+
+This endpoint is a **no-op** when `PRINT_ONLY_MODE=true` because the
+outbound watcher that creates the job records isn't running.
+
+## Fax Retention / Cleanup
+
+A background sweeper periodically removes old **received** faxes from
+`FTP_ROOT/synergyfaxq/` (or `FTP_ROOT/` if you've set `FaxDir=""`).
+This applies to both `.pdf` and `.recv` files. **Outbound** files
+(`.sfc`, `q*.sts`, `q*.done`, `q*.fail`, `.jobid`) are not touched —
+their lifecycle is managed separately by the watcher.
+
+### Configuration
+
+| Variable                     | Default | Notes                                                              |
+| ---------------------------- | ------- | ------------------------------------------------------------------ |
+| `FAX_RETENTION_HOURS`        | `24`    | Files older than this are deleted. Set to `0` to disable entirely. |
+| `FAX_CLEANUP_INTERVAL_MINUTES` | `60`  | How often the sweeper runs (and once on startup).                  |
+
+### How the timer relates to printing
+
+The sweeper uses each file's modification time (`mtime`):
+
+- **`PRINT_ONLY_MODE=false`** — file mtime is the **receipt time**
+  (when the PDF was written). Retention is "keep for 24h after
+  receipt".
+- **`PRINT_ONLY_MODE=true`** — after a **successful** SumatraPDF
+  print, the service updates the file's mtime to the print time via
+  `os.Chtimes`. Retention is therefore "keep for 24h after print".
+  - **Failed prints keep the original mtime** and survive for the
+    full retention window, giving you a longer tail to debug/retry
+    from disk before they're deleted.
+
+### Notes & caveats
+
+- Locked files (currently being printed, or being read by a downstream
+  tool that opened the `.recv`) fail to delete silently and are
+  retried on the next sweep — there's no separate retry queue.
+- `FAX_RETENTION_HOURS=0` disables the sweeper entirely; received
+  PDFs will then accumulate forever (a warning is logged on startup).
+- The sweeper does not look at the `.recv` file's content — it only
+  uses mtime. If you manually touch/rewrite a file and want it
+  retained, set its mtime back manually.
+- The retention clock is wall-clock based, not based on the receipt
+  notification — clock skew on the fax server affects deletion timing.
 
 ## Accessing the Services
 

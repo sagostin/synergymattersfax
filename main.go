@@ -280,6 +280,15 @@ func main() {
 		if getEnvBool("PRINT_ONLY_MODE", false) {
 			if err := printPdfWithSumatraPDF(pdfLocalPath); err != nil {
 				log.Printf("SumatraPDF print failed: %v", err)
+			} else {
+				// Successful print: reset mtime so the cleanup sweeper
+				// counts retention from "after print" rather than from
+				// receipt. Failed prints keep their original mtime and
+				// therefore survive longer for debugging/retry.
+				now := time.Now()
+				if err := os.Chtimes(pdfLocalPath, now, now); err != nil {
+					log.Printf("Failed to update mtime after print: %v", err)
+				}
 			}
 		} else {
 			loc, err := time.LoadLocation("America/Vancouver")
@@ -387,6 +396,31 @@ func main() {
 	printOnlyMode := getEnvBool("PRINT_ONLY_MODE", false)
 	if !printOnlyMode {
 		go watchFaxFolder(os.Getenv("FTP_ROOT") + FaxDir)
+	}
+
+	// Background cleanup of old received faxes. Controlled by
+	// FAX_RETENTION_HOURS (default 24) and FAX_CLEANUP_INTERVAL_MINUTES
+	// (default 60). Set FAX_RETENTION_HOURS=0 to disable.
+	retentionHours := 24
+	if v := os.Getenv("FAX_RETENTION_HOURS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			retentionHours = n
+		}
+	}
+	cleanupIntervalMin := 60
+	if v := os.Getenv("FAX_CLEANUP_INTERVAL_MINUTES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cleanupIntervalMin = n
+		}
+	}
+	if retentionHours > 0 {
+		go cleanupOldFaxes(
+			os.Getenv("FTP_ROOT")+FaxDir,
+			time.Duration(retentionHours)*time.Hour,
+			time.Duration(cleanupIntervalMin)*time.Minute,
+		)
+	} else {
+		log.Printf("Fax cleanup disabled (FAX_RETENTION_HOURS=0); received PDFs will accumulate indefinitely")
 	}
 
 	port := os.Getenv("PORT")
@@ -731,4 +765,65 @@ func generateJobID() string {
 		return id[len(id)-6:]
 	}
 	return id
+}
+
+// cleanupOldFaxes periodically deletes received `.pdf` and `.recv` files
+// in `dir` whose modification time is older than `retention`. Runs once
+// on startup, then every `interval`. In PRINT_ONLY_MODE, files have
+// their mtime reset to "now" after a successful print, so the timer is
+// effectively "retention after print" in that mode and "retention after
+// receipt" in the default mode. Locked files (e.g. currently being
+// printed or read by a downstream tool) fail to delete and are retried
+// on the next sweep.
+func cleanupOldFaxes(dir string, retention, interval time.Duration) {
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		log.Printf("Cleanup: directory %s does not exist; sweeper exiting", dir)
+		return
+	}
+
+	log.Printf("Cleanup: sweeping %s every %s, removing files older than %s", dir, interval, retention)
+
+	runOnce := func() {
+		cutoff := time.Now().Add(-retention)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			log.Printf("Cleanup: failed to read directory %s: %v", dir, err)
+			return
+		}
+		removed := 0
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := strings.ToLower(entry.Name())
+			if !strings.HasSuffix(name, ".pdf") && !strings.HasSuffix(name, ".recv") {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			if !info.ModTime().Before(cutoff) {
+				continue
+			}
+			fullPath := filepath.Join(dir, entry.Name())
+			if err := os.Remove(fullPath); err != nil {
+				log.Printf("Cleanup: failed to remove %s: %v", fullPath, err)
+				continue
+			}
+			log.Printf("Cleanup: removed %s (mtime %s, cutoff %s)",
+				fullPath, info.ModTime().Format(time.RFC3339), cutoff.Format(time.RFC3339))
+			removed++
+		}
+		if removed > 0 {
+			log.Printf("Cleanup: removed %d file(s) from %s", removed, dir)
+		}
+	}
+
+	runOnce()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for range ticker.C {
+		runOnce()
+	}
 }
